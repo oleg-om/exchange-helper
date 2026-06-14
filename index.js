@@ -4,10 +4,18 @@ const cron = require('node-cron');
 const axios = require('axios');
 const https = require('https');
 const crypto = require('crypto');
+const dns = require('dns');
+
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder('ipv4first');
+}
 
 const legacyTlsAgent = new https.Agent({
+  family: 4,
   secureOptions: crypto.constants.SSL_OP_LEGACY_SERVER_CONNECT,
 });
+
+const ipv4Agent = new https.Agent({ family: 4 });
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const TARGET_USER_ID = 1663965326;
@@ -21,17 +29,49 @@ const LINKS = {
   unistream: process.env.UNISTREAM_LINK,
   avangard: process.env.AVANGARD_LINK,
   rbc: process.env.RBC_LINK,
+  tbank: process.env.TBANK_LINK,
 };
 
 const AVANGARD_OFFICES = Object.fromEntries(
   (process.env.AVANGARD_OFFICES || '').split(',').filter(Boolean).map(id => [id.trim(), null])
 );
 
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+const TBANK_API_URL = process.env.TBANK_API_URL;
+
+const botRequestOptions = {
+  agentClass: https.Agent,
+  agentOptions: { family: 4, keepAlive: true },
+  timeout: 30000,
+};
+
+if (process.env.TELEGRAM_PROXY) {
+  botRequestOptions.proxy = process.env.TELEGRAM_PROXY;
+}
+
+const bot = new TelegramBot(BOT_TOKEN, {
+  polling: true,
+  request: botRequestOptions,
+});
+
+bot.on('polling_error', (err) => {
+  console.error(`[${new Date().toISOString()}] polling_error:`, err.code, err.message);
+  if (err.code === 'EFATAL' || String(err.message).includes('AggregateError')) {
+    console.error('Cannot reach Telegram API. Try TELEGRAM_PROXY in .env or check outbound HTTPS access.');
+  }
+});
 
 bot.setMyCommands([
   { command: 'rates', description: 'Получить текущий курс USD в Юнистрим' },
-]);
+]).catch((err) => {
+  console.error(`[${new Date().toISOString()}] Failed to set bot commands:`, err.message);
+});
+
+bot.getMe()
+  .then((me) => console.log(`Connected to Telegram as @${me.username}`))
+  .catch((err) => {
+    console.error(`[${new Date().toISOString()}] Telegram connection failed:`, err.message);
+    console.error('Set TELEGRAM_PROXY in .env if Telegram is blocked on this server.');
+  });
 
 function extractStreetAddress(fullAddress) {
   // "119361, МОСКВА Г, ОЗЕРНАЯ УЛ, 33" -> "ул. Озерная, 33"
@@ -117,6 +157,27 @@ async function fetchRbcTopRates() {
   };
 }
 
+async function fetchTbankRate() {
+  const response = await axios.get(TBANK_API_URL, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; exchange-helper-bot/1.0)',
+      'Accept': 'application/json',
+    },
+    timeout: 10000,
+  });
+
+  const rates = response.data?.payload?.rates;
+  if (!rates) return null;
+
+  const entry = rates.find(
+    r => r.category === 'CUTransferAbove100' &&
+      r.fromCurrency?.name === 'USD' &&
+      r.toCurrency?.name === 'RUB'
+  );
+
+  return entry?.buy ?? null;
+}
+
 async function fetchAvangardRates() {
   const commonHeaders = {
     'User-Agent': 'Mozilla/5.0 (compatible; exchange-helper-bot/1.0)',
@@ -173,7 +234,7 @@ function linkHeader(text, url) {
   return `<a href="${href}">${text}</a>`;
 }
 
-function formatMessage(unistreamRates, rbcData, avangardRates) {
+function formatMessage(unistreamRates, rbcData, avangardRates, tbankBuyRate) {
   const now = new Date().toLocaleDateString('ru-RU', {
     day: '2-digit', month: '2-digit', year: 'numeric',
   });
@@ -190,6 +251,9 @@ function formatMessage(unistreamRates, rbcData, avangardRates) {
   }
 
   const { top3, top3NoUnistream } = rbcData;
+
+  const tbankLine = tbankBuyRate != null ? `1. CUTransferAbove100: ${tbankBuyRate} ₽` : '❌ Нет данных';
+  parts.push('\n' + linkHeader('🏦 Т-Банк', LINKS.tbank) + '\n' + tbankLine);
 
   if (avangardRates.length > 0) {
     const lines = avangardRates.map((r, i) =>
@@ -224,12 +288,13 @@ function formatMessage(unistreamRates, rbcData, avangardRates) {
 async function sendRates(chatId) {
   try {
     console.log(`[${new Date().toISOString()}] Fetching rates...`);
-    const [unistreamRates, rbcData, avangardRates] = await Promise.all([
+    const [unistreamRates, rbcData, avangardRates, tbankBuyRate] = await Promise.all([
       fetchUnistreamRates(),
       fetchRbcTopRates(),
       fetchAvangardRates(),
+      fetchTbankRate(),
     ]);
-    const message = formatMessage(unistreamRates, rbcData, avangardRates);
+    const message = formatMessage(unistreamRates, rbcData, avangardRates, tbankBuyRate);
     await bot.sendMessage(chatId, message, { parse_mode: 'HTML' });
     console.log(`[${new Date().toISOString()}] Message sent to ${chatId}.`);
   } catch (err) {
