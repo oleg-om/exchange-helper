@@ -252,7 +252,7 @@ function formatMessage(unistreamRates, rbcData, avangardRates, tbankBuyRate) {
 
   const { top3, top3NoUnistream } = rbcData;
 
-  const tbankLine = tbankBuyRate != null ? `1. CUTransferAbove100: ${tbankBuyRate} ₽` : '❌ Нет данных';
+  const tbankLine = tbankBuyRate != null ? `1. Продать: ${tbankBuyRate} ₽` : '❌ Нет данных';
   parts.push('\n' + linkHeader('🏦 Т-Банк', LINKS.tbank) + '\n' + tbankLine);
 
   if (avangardRates.length > 0) {
