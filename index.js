@@ -5,6 +5,30 @@ const axios = require('axios');
 const https = require('https');
 const crypto = require('crypto');
 const dns = require('dns');
+const fs = require('fs');
+const path = require('path');
+
+const HISTORY_FILE = path.join(__dirname, 'rates-history.json');
+
+function loadHistory() {
+  try {
+    return JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function saveHistory(data) {
+  fs.writeFileSync(HISTORY_FILE, JSON.stringify(data, null, 2), 'utf8');
+}
+
+function diff(current, previous) {
+  if (previous == null || current == null) return '';
+  const delta = current - previous;
+  if (delta === 0) return '';
+  const pct = Math.abs((delta / previous) * 100).toFixed(2);
+  return delta > 0 ? ` 📈 +${pct}%` : ` 📉 -${pct}%`;
+}
 
 if (dns.setDefaultResultOrder) {
   dns.setDefaultResultOrder('ipv4first');
@@ -234,7 +258,7 @@ function linkHeader(text, url) {
   return `<a href="${href}">${text}</a>`;
 }
 
-function formatMessage(unistreamRates, rbcData, avangardRates, tbankBuyRate) {
+function formatMessage(unistreamRates, rbcData, avangardRates, tbankBuyRate, history) {
   const now = new Date().toLocaleDateString('ru-RU', {
     day: '2-digit', month: '2-digit', year: 'numeric',
   });
@@ -242,9 +266,10 @@ function formatMessage(unistreamRates, rbcData, avangardRates, tbankBuyRate) {
   const parts = [`📅 Курс USD на ${now}`];
 
   if (unistreamRates.length > 0) {
-    const lines = unistreamRates.map((r, i) =>
-      `${i + 1}. ${escapeHtml(r.name)}: ${r.buyRate} ₽`
-    );
+    const lines = unistreamRates.map((r, i) => {
+      const prevRate = history?.unistream?.[i]?.buyRate ?? null;
+      return `${i + 1}. ${escapeHtml(r.name)}: ${r.buyRate} ₽${diff(r.buyRate, prevRate)}`;
+    });
     parts.push('\n' + linkHeader('🏦 Юнистрим', LINKS.unistream) + '\n' + lines.join('\n'));
   } else {
     parts.push('\n' + linkHeader('🏦 Юнистрим', LINKS.unistream) + '\n❌ Нет данных');
@@ -252,13 +277,17 @@ function formatMessage(unistreamRates, rbcData, avangardRates, tbankBuyRate) {
 
   const { top3, top3NoUnistream } = rbcData;
 
-  const tbankLine = tbankBuyRate != null ? `1. Продать: ${tbankBuyRate} ₽` : '❌ Нет данных';
+  const prevTbank = history?.tbank ?? null;
+  const tbankLine = tbankBuyRate != null
+    ? `1. Продать: ${tbankBuyRate} ₽${diff(tbankBuyRate, prevTbank)}`
+    : '❌ Нет данных';
   parts.push('\n' + linkHeader('🏦 Т-Банк', LINKS.tbank) + '\n' + tbankLine);
 
   if (avangardRates.length > 0) {
-    const lines = avangardRates.map((r, i) =>
-      `${i + 1}. ${escapeHtml(r.name)}: ${r.buyRate} ₽`
-    );
+    const lines = avangardRates.map((r, i) => {
+      const prevRate = history?.avangard?.[i]?.buyRate ?? null;
+      return `${i + 1}. ${escapeHtml(r.name)}: ${r.buyRate} ₽${diff(r.buyRate, prevRate)}`;
+    });
     parts.push('\n' + linkHeader('🏦 Авангард', LINKS.avangard) + '\n' + lines.join('\n'));
   } else {
     parts.push('\n' + linkHeader('🏦 Авангард', LINKS.avangard) + '\n❌ Нет данных');
@@ -288,14 +317,21 @@ function formatMessage(unistreamRates, rbcData, avangardRates, tbankBuyRate) {
 async function sendRates(chatId) {
   try {
     console.log(`[${new Date().toISOString()}] Fetching rates...`);
+    const history = loadHistory();
     const [unistreamRates, rbcData, avangardRates, tbankBuyRate] = await Promise.all([
       fetchUnistreamRates(),
       fetchRbcTopRates(),
       fetchAvangardRates(),
       fetchTbankRate(),
     ]);
-    const message = formatMessage(unistreamRates, rbcData, avangardRates, tbankBuyRate);
+    const message = formatMessage(unistreamRates, rbcData, avangardRates, tbankBuyRate, history);
     await bot.sendMessage(chatId, message, { parse_mode: 'HTML' });
+    saveHistory({
+      updatedAt: new Date().toISOString(),
+      unistream: unistreamRates.map(r => ({ name: r.name, buyRate: r.buyRate })),
+      tbank: tbankBuyRate,
+      avangard: avangardRates.map(r => ({ name: r.name, buyRate: r.buyRate })),
+    });
     console.log(`[${new Date().toISOString()}] Message sent to ${chatId}.`);
   } catch (err) {
     console.error(`[${new Date().toISOString()}] Error:`, err.message);
