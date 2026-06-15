@@ -268,7 +268,7 @@ function formatMessage(unistreamRates, rbcData, avangardRates, tbankBuyRate, his
   if (unistreamRates.length > 0) {
     const lines = unistreamRates.map((r, i) => {
       const prevRate = history?.unistream?.[i]?.buyRate ?? null;
-      return `${i + 1}. ${escapeHtml(r.name)}: ${r.buyRate} ₽${diff(r.buyRate, prevRate)}`;
+      return `${i + 1}. ${escapeHtml(r.name)}: <b>${r.buyRate} ₽</b>${diff(r.buyRate, prevRate)}`;
     });
     parts.push('\n' + linkHeader('🏦 Юнистрим', LINKS.unistream) + '\n' + lines.join('\n'));
   } else {
@@ -279,14 +279,14 @@ function formatMessage(unistreamRates, rbcData, avangardRates, tbankBuyRate, his
 
   const prevTbank = history?.tbank ?? null;
   const tbankLine = tbankBuyRate != null
-    ? `1. Продать: ${tbankBuyRate} ₽${diff(tbankBuyRate, prevTbank)}`
+    ? `1. Продать: <b>${tbankBuyRate} ₽</b>${diff(tbankBuyRate, prevTbank)}`
     : '❌ Нет данных';
   parts.push('\n' + linkHeader('🏦 Т-Банк', LINKS.tbank) + '\n' + tbankLine);
 
   if (avangardRates.length > 0) {
     const lines = avangardRates.map((r, i) => {
       const prevRate = history?.avangard?.[i]?.buyRate ?? null;
-      return `${i + 1}. ${escapeHtml(r.name)}: ${r.buyRate} ₽${diff(r.buyRate, prevRate)}`;
+      return `${i + 1}. ${escapeHtml(r.name)}: <b>${r.buyRate} ₽</b>${diff(r.buyRate, prevRate)}`;
     });
     parts.push('\n' + linkHeader('🏦 Авангард', LINKS.avangard) + '\n' + lines.join('\n'));
   } else {
@@ -295,7 +295,7 @@ function formatMessage(unistreamRates, rbcData, avangardRates, tbankBuyRate, his
 
   if (top3.length > 0) {
     const lines = top3.map((r, i) =>
-      `${i + 1}. ${escapeHtml(r.name)}: ${r.buyRate} ₽`
+      `${i + 1}. ${escapeHtml(r.name)}: <b>${r.buyRate} ₽</b>`
     );
     parts.push('\n' + linkHeader('🏆 Топ-3 по покупке (РБК)', LINKS.rbc) + '\n' + lines.join('\n'));
   } else {
@@ -304,7 +304,7 @@ function formatMessage(unistreamRates, rbcData, avangardRates, tbankBuyRate, his
 
   if (top3NoUnistream.length > 0) {
     const lines = top3NoUnistream.map((r, i) =>
-      `${i + 1}. ${escapeHtml(r.name)}: ${r.buyRate} ₽`
+      `${i + 1}. ${escapeHtml(r.name)}: <b>${r.buyRate} ₽</b>`
     );
     parts.push('\n' + linkHeader('🏆 Топ-3 по покупке (РБК) без Юнистрим', LINKS.rbc) + '\n' + lines.join('\n'));
   } else {
