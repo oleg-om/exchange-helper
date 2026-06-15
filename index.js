@@ -306,9 +306,9 @@ async function sendDailyRates() {
   await sendRates(TARGET_USER_ID);
 }
 
-// Every day at 11:00 Moscow time (UTC+3 = 08:00 UTC)
-cron.schedule('0 8 * * *', sendDailyRates, {
-  timezone: 'Europe/Moscow',
+// Every day at 11:00 UTC
+cron.schedule('0 11 * * *', sendDailyRates, {
+  timezone: 'UTC',
 });
 
 console.log('Bot started. Will send rates every day at 11:00 MSK.');
