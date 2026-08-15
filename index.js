@@ -41,6 +41,10 @@ const legacyTlsAgent = new https.Agent({
 
 const ipv4Agent = new https.Agent({ family: 4 });
 
+// forabank.ru serves its chain via the Russian Trusted Root CA, which isn't in Node's
+// default trust store (AIA chasing that browsers do isn't available here).
+const foraTlsAgent = new https.Agent({ ca: process.env.RUSSIAN_TRUSTED_ROOT_CA, family: 4 });
+
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const TARGET_USER_ID = 1663965326;
 
@@ -54,6 +58,7 @@ const LINKS = {
   avangard: process.env.AVANGARD_LINK,
   rbc: process.env.RBC_LINK,
   tbank: process.env.TBANK_LINK,
+  fora: process.env.FORA_LINK,
 };
 
 const AVANGARD_OFFICES = Object.fromEntries(
@@ -61,6 +66,10 @@ const AVANGARD_OFFICES = Object.fromEntries(
 );
 
 const TBANK_API_URL = process.env.TBANK_API_URL;
+
+const FORA_API_URL = process.env.FORA_API_URL;
+const FORA_CITY_ID = process.env.FORA_CITY_ID;
+const FORA_OFFICE_ID = process.env.FORA_OFFICE_ID;
 
 const botRequestOptions = {
   agentClass: https.Agent,
@@ -246,6 +255,92 @@ async function fetchAvangardRates() {
     }));
 }
 
+// forabank.ru gates every request behind a JS challenge page: it hands out an
+// "__js_p_" cookie encoding a seed, expects the client to run a slow hash over it
+// client-side, and only serves real content once a matching "__jhash_" cookie comes
+// back after a ~1s delay (mirroring the page's own setTimeout). This replicates that
+// exact algorithm (lifted from the challenge page's inline script) server-side.
+function foraJhash(seed) {
+  let x = 123456789;
+  let k = 0;
+  for (let i = 0; i < 1677696; i++) {
+    x = ((x + seed) ^ (x + (x % 3) + (x % 17) + seed) ^ i) % 16776960;
+    if (x % 117 === 0) k = (k + 1) % 1111;
+  }
+  return k;
+}
+
+function parseSetCookies(setCookieHeader) {
+  const jar = {};
+  for (const entry of setCookieHeader || []) {
+    const pair = entry.split(';')[0];
+    const idx = pair.indexOf('=');
+    jar[pair.slice(0, idx)] = pair.slice(idx + 1);
+  }
+  return jar;
+}
+
+function cookieHeader(jar) {
+  return Object.entries(jar).map(([k, v]) => `${k}=${v}`).join('; ');
+}
+
+async function fetchForaRate() {
+  const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+  const commonHeaders = { 'User-Agent': userAgent };
+
+  const jar = {};
+
+  // Step 1: hit the page to receive the "__js_p_" challenge seed.
+  const first = await axios.get(FORA_API_URL, {
+    headers: commonHeaders,
+    httpsAgent: foraTlsAgent,
+    timeout: 10000,
+  });
+  Object.assign(jar, parseSetCookies(first.headers['set-cookie']));
+
+  const seed = parseInt(jar['__js_p_'].split(',')[0], 10);
+  jar['__jhash_'] = foraJhash(seed);
+  jar['__jua_'] = encodeURIComponent(userAgent);
+
+  // The challenge page itself waits 1s before replaying the request; mirror that.
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+
+  // Step 2: replay with the solved hash. Server responds 302 + a "__hash_" cookie
+  // that marks this cookie jar as verified for subsequent requests.
+  const second = await axios.get(FORA_API_URL, {
+    headers: { ...commonHeaders, Cookie: cookieHeader(jar) },
+    httpsAgent: foraTlsAgent,
+    timeout: 10000,
+    maxRedirects: 0,
+    validateStatus: (status) => status === 200 || status === 302,
+  });
+  Object.assign(jar, parseSetCookies(second.headers['set-cookie']));
+
+  // Step 3: now the AJAX endpoint behind the same challenge will respond with data.
+  const response = await axios.post(
+    `${FORA_API_URL}?act=exchange_offices`,
+    `cityId=${FORA_CITY_ID}&officeId=${FORA_OFFICE_ID}`,
+    {
+      headers: {
+        ...commonHeaders,
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Referer': FORA_API_URL,
+        'Cookie': cookieHeader(jar),
+      },
+      httpsAgent: foraTlsAgent,
+      timeout: 10000,
+    }
+  );
+
+  const html = response.data?.html;
+  if (!html) return null;
+
+  // Values appear in order: USD buy, EUR buy, USD sell, EUR sell.
+  const values = [...html.matchAll(/-arr">\s*([\d.]+)/g)].map((m) => parseFloat(m[1]));
+  return values[2] ?? null;
+}
+
 function escapeHtml(text) {
   return String(text)
     .replace(/&/g, '&amp;')
@@ -258,7 +353,7 @@ function linkHeader(text, url) {
   return `<a href="${href}">${text}</a>`;
 }
 
-function formatMessage(unistreamRates, rbcData, avangardRates, tbankBuyRate, history) {
+function formatMessage(unistreamRates, rbcData, avangardRates, tbankBuyRate, foraSellRate, history) {
   const now = new Date().toLocaleDateString('ru-RU', {
     day: '2-digit', month: '2-digit', year: 'numeric',
   });
@@ -282,6 +377,12 @@ function formatMessage(unistreamRates, rbcData, avangardRates, tbankBuyRate, his
     ? `1. Продать: <b>${tbankBuyRate} ₽</b>${diff(tbankBuyRate, prevTbank)}`
     : '❌ Нет данных';
   parts.push('\n' + linkHeader('🏦 Т-Банк', LINKS.tbank) + '\n' + tbankLine);
+
+  const prevFora = history?.fora ?? null;
+  const foraLine = foraSellRate != null
+    ? `1. Продать: <b>${foraSellRate} ₽</b>${diff(foraSellRate, prevFora)}`
+    : '❌ Нет данных';
+  parts.push('\n' + linkHeader('🏦 Фора-Банк (Авеню)', LINKS.fora) + '\n' + foraLine);
 
   if (avangardRates.length > 0) {
     const lines = avangardRates.map((r, i) => {
@@ -318,18 +419,23 @@ async function sendRates(chatId) {
   try {
     console.log(`[${new Date().toISOString()}] Fetching rates...`);
     const history = loadHistory();
-    const [unistreamRates, rbcData, avangardRates, tbankBuyRate] = await Promise.all([
+    const [unistreamRates, rbcData, avangardRates, tbankBuyRate, foraSellRate] = await Promise.all([
       fetchUnistreamRates(),
       fetchRbcTopRates(),
       fetchAvangardRates(),
       fetchTbankRate(),
+      fetchForaRate().catch((err) => {
+        console.error(`[${new Date().toISOString()}] Fora fetch failed:`, err.message);
+        return null;
+      }),
     ]);
-    const message = formatMessage(unistreamRates, rbcData, avangardRates, tbankBuyRate, history);
+    const message = formatMessage(unistreamRates, rbcData, avangardRates, tbankBuyRate, foraSellRate, history);
     await bot.sendMessage(chatId, message, { parse_mode: 'HTML' });
     saveHistory({
       updatedAt: new Date().toISOString(),
       unistream: unistreamRates.map(r => ({ name: r.name, buyRate: r.buyRate })),
       tbank: tbankBuyRate,
+      fora: foraSellRate,
       avangard: avangardRates.map(r => ({ name: r.name, buyRate: r.buyRate })),
     });
     console.log(`[${new Date().toISOString()}] Message sent to ${chatId}.`);
