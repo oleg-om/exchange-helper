@@ -338,7 +338,7 @@ async function fetchForaRate() {
 
   // Values appear in order: USD buy, EUR buy, USD sell, EUR sell.
   const values = [...html.matchAll(/-arr">\s*([\d.]+)/g)].map((m) => parseFloat(m[1]));
-  return values[2] ?? null;
+  return values[0] ?? null;
 }
 
 function escapeHtml(text) {
